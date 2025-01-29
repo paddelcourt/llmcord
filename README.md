@@ -12,6 +12,9 @@
 
 llmcord transforms Discord into a collaborative LLM frontend. It works with practically any LLM, remote or locally hosted.
 
+## Note:
+This is the forked version that has included changes to be able to take in the channel history as context for LLM answering.
+
 ## Features
 
 ### Reply-based chat system

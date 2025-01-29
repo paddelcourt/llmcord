@@ -131,7 +131,7 @@ async def on_message(new_msg):
                     ([cleaned_content] if cleaned_content else []) +
                     [embed.description for embed in curr_msg.embeds if embed.description] +
                     [(await httpx_client.get(att.url)).text for att in good_attachments["text"]]
-                )
+                )[:max_text]
 
                 curr_node.images = [
                     dict(type="image_url", image_url=dict(url=f"data:{att.content_type};base64,{b64encode((await httpx_client.get(att.url)).content).decode('utf-8')}"))
@@ -172,6 +172,11 @@ async def on_message(new_msg):
 
         full_system_prompt = "\n".join([system_prompt] + system_prompt_extras)
         messages.append(dict(role="system", content=full_system_prompt))
+
+    # Add to warning checks
+    estimated_tokens = len("".join(m["content"] for m in messages)) // 3.5  # rough approximation
+    if estimated_tokens > 100000:
+        user_warnings.add("⚠️ Context exceeds 100K tokens - responses may be incomplete")
 
     # Generate and send response message(s) (can be multiple if response is long)
     response_msgs = []

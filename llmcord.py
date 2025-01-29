@@ -113,23 +113,24 @@ async def on_message(new_msg):
     use_plain_responses = cfg["use_plain_responses"]
     max_message_length = 2000 if use_plain_responses else (4096 - len(STREAMING_INDICATOR))
 
-    # Build message chain and set user warnings
+    # Modified message collection using channel history
     messages = []
     user_warnings = set()
-    curr_msg = new_msg
-    while curr_msg != None and len(messages) < max_messages:
+    
+    async for curr_msg in new_msg.channel.history(limit=max_messages):
         curr_node = msg_nodes.setdefault(curr_msg.id, MsgNode())
 
         async with curr_node.lock:
-            if curr_node.text == None:
+            if curr_node.text is None:
                 cleaned_content = curr_msg.content.removeprefix(discord_client.user.mention).lstrip()
 
-                good_attachments = {type: [att for att in curr_msg.attachments if att.content_type and type in att.content_type] for type in ALLOWED_FILE_TYPES}
+                good_attachments = {type: [att for att in curr_msg.attachments if att.content_type and type in att.content_type] 
+                                  for type in ALLOWED_FILE_TYPES}
 
                 curr_node.text = "\n".join(
-                    ([cleaned_content] if cleaned_content else [])
-                    + [embed.description for embed in curr_msg.embeds if embed.description]
-                    + [(await httpx_client.get(att.url)).text for att in good_attachments["text"]]
+                    ([cleaned_content] if cleaned_content else []) +
+                    [embed.description for embed in curr_msg.embeds if embed.description] +
+                    [(await httpx_client.get(att.url)).text for att in good_attachments["text"]]
                 )
 
                 curr_node.images = [
@@ -138,56 +139,29 @@ async def on_message(new_msg):
                 ]
 
                 curr_node.role = "assistant" if curr_msg.author == discord_client.user else "user"
-
                 curr_node.user_id = curr_msg.author.id if curr_node.role == "user" else None
 
-                curr_node.has_bad_attachments = len(curr_msg.attachments) > sum(len(att_list) for att_list in good_attachments.values())
-
-                try:
-                    if (
-                        not curr_msg.reference
-                        and discord_client.user.mention not in curr_msg.content
-                        and (prev_msg_in_channel := ([m async for m in curr_msg.channel.history(before=curr_msg, limit=1)] or [None])[0])
-                        and prev_msg_in_channel.type in (discord.MessageType.default, discord.MessageType.reply)
-                        and prev_msg_in_channel.author == (discord_client.user if curr_msg.channel.type == discord.ChannelType.private else curr_msg.author)
-                    ):
-                        curr_node.next_msg = prev_msg_in_channel
-                    else:
-                        is_public_thread = curr_msg.channel.type == discord.ChannelType.public_thread
-                        next_is_parent_msg = not curr_msg.reference and is_public_thread and curr_msg.channel.parent.type == discord.ChannelType.text
-
-                        if next_msg_id := curr_msg.channel.id if next_is_parent_msg else getattr(curr_msg.reference, "message_id", None):
-                            if next_is_parent_msg:
-                                curr_node.next_msg = curr_msg.channel.starter_message or await curr_msg.channel.parent.fetch_message(next_msg_id)
-                            else:
-                                curr_node.next_msg = curr_msg.reference.cached_message or await curr_msg.channel.fetch_message(next_msg_id)
-
-                except (discord.NotFound, discord.HTTPException):
-                    logging.exception("Error fetching next message in the chain")
-                    curr_node.fetch_next_failed = True
-
+            # Process content and warnings
             if curr_node.images[:max_images]:
                 content = ([dict(type="text", text=curr_node.text[:max_text])] if curr_node.text[:max_text] else []) + curr_node.images[:max_images]
             else:
                 content = curr_node.text[:max_text]
 
-            if content != "":
+            if content:
                 message = dict(content=content, role=curr_node.role)
-                if accept_usernames and curr_node.user_id != None:
+                if accept_usernames and curr_node.user_id is not None:
                     message["name"] = str(curr_node.user_id)
-
+                
                 messages.append(message)
 
+            # Add warnings if needed
             if len(curr_node.text) > max_text:
                 user_warnings.add(f"⚠️ Max {max_text:,} characters per message")
             if len(curr_node.images) > max_images:
-                user_warnings.add(f"⚠️ Max {max_images} image{'' if max_images == 1 else 's'} per message" if max_images > 0 else "⚠️ Can't see images")
-            if curr_node.has_bad_attachments:
-                user_warnings.add("⚠️ Unsupported attachments")
-            if curr_node.fetch_next_failed or (curr_node.next_msg != None and len(messages) == max_messages):
-                user_warnings.add(f"⚠️ Only using last {len(messages)} message{'' if len(messages) == 1 else 's'}")
-
-            curr_msg = curr_node.next_msg
+                user_warnings.add(f"⚠️ Max {max_images} image{'' if max_images == 1 else 's'} per message")
+                
+    # Reverse to maintain chronological order
+    messages = messages[::-1]
 
     logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
 
@@ -209,7 +183,7 @@ async def on_message(new_msg):
     for warning in sorted(user_warnings):
         embed.add_field(name=warning, value="", inline=False)
 
-    kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_body=cfg["extra_api_parameters"])
+    kwargs = dict(model=model, messages=messages, stream=True, extra_body=cfg["extra_api_parameters"])
     try:
         async with new_msg.channel.typing():
             async for curr_chunk in await openai_client.chat.completions.create(**kwargs):
@@ -278,6 +252,7 @@ async def on_message(new_msg):
 
 async def main():
     await discord_client.start(cfg["bot_token"])
+
 
 
 asyncio.run(main())
